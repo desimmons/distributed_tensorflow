@@ -1,0 +1,713 @@
+#LyX 2.2 created this file. For more info see http://www.lyx.org/
+\lyxformat 508
+\begin_document
+\begin_header
+\save_transient_properties true
+\origin unavailable
+\textclass article
+\begin_preamble
+\usepackage{url}
+\end_preamble
+\use_default_options true
+\maintain_unincluded_children false
+\language english
+\language_package default
+\inputencoding auto
+\fontencoding global
+\font_roman "default" "default"
+\font_sans "default" "default"
+\font_typewriter "default" "default"
+\font_math "auto" "auto"
+\font_default_family default
+\use_non_tex_fonts false
+\font_sc false
+\font_osf false
+\font_sf_scale 100 100
+\font_tt_scale 100 100
+\graphics default
+\default_output_format default
+\output_sync 0
+\bibtex_command default
+\index_command default
+\paperfontsize default
+\spacing single
+\use_hyperref false
+\papersize default
+\use_geometry true
+\use_package amsmath 1
+\use_package amssymb 1
+\use_package cancel 1
+\use_package esint 1
+\use_package mathdots 1
+\use_package mathtools 1
+\use_package mhchem 1
+\use_package stackrel 1
+\use_package stmaryrd 1
+\use_package undertilde 1
+\cite_engine basic
+\cite_engine_type default
+\biblio_style unsrt
+\use_bibtopic false
+\use_indices false
+\paperorientation portrait
+\suppress_date false
+\justification true
+\use_refstyle 1
+\index Index
+\shortcut idx
+\color #008000
+\end_index
+\leftmargin 1cm
+\topmargin 1cm
+\rightmargin 1cm
+\bottommargin 2cm
+\secnumdepth 3
+\tocdepth 3
+\paragraph_separation indent
+\paragraph_indentation default
+\quotes_language english
+\papercolumns 1
+\papersides 1
+\paperpagestyle default
+\tracking_changes false
+\output_changes false
+\html_math_output 0
+\html_css_as_file 0
+\html_be_strict false
+\end_header
+
+\begin_body
+
+\begin_layout Title
+Distributed TensorFlow
+\end_layout
+
+\begin_layout Author
+David Simmons
+\end_layout
+
+\begin_layout Abstract
+This document summarizes the fundamentals of distributed TensorFlow training
+ in section 
+\begin_inset CommandInset ref
+LatexCommand ref
+reference "sec:Introduction"
+
+\end_inset
+
+ and discusses the code and its design in section 
+\begin_inset CommandInset ref
+LatexCommand ref
+reference "sec:code"
+
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Section
+Background
+\begin_inset CommandInset label
+LatexCommand label
+name "sec:Introduction"
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+In the following subsections, we overview the fundamentals of distributed
+ TensorFlow training.
+\end_layout
+
+\begin_layout Subsection
+Workers and Parameter Servers
+\end_layout
+
+\begin_layout Standard
+The typical approach to implementing a distributed TensorFlow 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "WinNT"
+
+\end_inset
+
+ solution is to split the problem across two process types: 
+\end_layout
+
+\begin_layout Enumerate
+a stateful process, the parameter server (PS); 
+\end_layout
+
+\begin_layout Enumerate
+a stateless process, the worker.
+\end_layout
+
+\begin_layout Standard
+The PSs generally deal with low complexity aspects of the problem (e.g., storing,
+ updating, and distributing model parameters), while the workers deal with
+ the computationally intensive aspects of the problem (e.g., performing forward
+ and back propagation).
+ 
+\end_layout
+
+\begin_layout Subsection
+Model Distribution Paradigms 
+\begin_inset CommandInset label
+LatexCommand label
+name "subsec:Distribution-Paradigms"
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+There are two standard approaches that may be taken when distributing the
+ computationally intensive parts of the graph to the workers 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "WinNT"
+
+\end_inset
+
+:
+\end_layout
+
+\begin_layout Enumerate
+model replication (also called data parallelism), where the entire computational
+ model is copied to each GPU/worker and each GPU/worker operates on a subset
+ of the data;
+\end_layout
+
+\begin_layout Enumerate
+model parallelism, used when the computational model cannot be stored by
+ each GPU/worker, so the model is partitioned into submodels and each GPU/worker
+ operates on a submodel.
+\end_layout
+
+\begin_layout Standard
+Owing to the relative simplicity of model replication, it tends to be the
+ implementation that is most commonly focused on.
+\end_layout
+
+\begin_layout Standard
+\begin_inset Separator plain
+\end_inset
+
+
+\end_layout
+
+\begin_layout Subsection
+Single or Multiple Clients
+\begin_inset CommandInset label
+LatexCommand label
+name "subsec:Single-or-Multiple"
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Each worker defined by the client will be able to interact with each parameter
+ server, and vice versa.
+ The PSs and workers are coordinated by the client they have been instantiated
+ by.
+ In the context of model replication, the number of clients present determines
+ whether our system is one of two types:
+\end_layout
+
+\begin_layout Enumerate
+in-graph replication, where the system is coordinated by a single master
+ client;
+\end_layout
+
+\begin_layout Enumerate
+between-graph replication, where the system is coordinated by multiple clients
+ - often one for each worker task.
+\end_layout
+
+\begin_layout Standard
+In-graph replication tends to work well when the number of graph replicas
+ (i.e., workers) is small.
+ However, as this number grows, the work load on the client grows too.
+ This can result in the single master client getting bogged down by the
+ coordination of lots of worker tasks, resulting in slower training times.
+ The solution is to increase the number of clients and employ between-graph
+ replication 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "WinNT"
+
+\end_inset
+
+.
+ 
+\end_layout
+
+\begin_layout Subsection
+Synchronous vs Asynchronous Workers
+\begin_inset CommandInset label
+LatexCommand label
+name "subsec:Synchronous-vs-Asynchronous"
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+For multi GPU architectures, the computations can be one of two types 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "WinNT"
+
+\end_inset
+
+:
+\end_layout
+
+\begin_layout Enumerate
+synchronous;
+\end_layout
+
+\begin_layout Enumerate
+asynchronous.
+\end_layout
+
+\begin_layout Standard
+Synchronous operations occur when the calculations from each GPU of a current
+ training loop are accumulated and used to update the parameter server before
+ the next training loop begins.
+ See 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "CIFR10TF"
+
+\end_inset
+
+ for an example implementation.
+ The issue with this approach is that GPUs are necessarily blocked from
+ operation until the slowest GPU has completed its computation.
+ To resolve this issue, asynchronous GPU computations can be performed.
+ One approach to asynchronous operations is to assign each worker to a subset
+ of the GPUs, and once each worker has finished its computation it independently
+ updates the parameter server's state.
+ The issue with this approach is that slow workers tend to update using
+ stale data.
+ With that being said, asynchronous computations tend to outperform synchronous
+ ones 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "WinNT"
+
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Section
+Designing the Code
+\begin_inset CommandInset label
+LatexCommand label
+name "sec:code"
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+In this section, we overview the design/development of a distributed TensorFlow
+ solution.
+ The author's computer had a GEFORCE 610M, which has a Cuda compute capability
+ of 2.1.
+ TensorFlow requires a Cuda capability of 
+\begin_inset Formula $3$
+\end_inset
+
+.
+ For the solution, we provide an option to utilize the Xception convolutional
+ neural network (CNN) model 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "XceptionGIT,Xception"
+
+\end_inset
+
+ or the standard TensorFlow tutorial CNN solution 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "CIFR10TF"
+
+\end_inset
+
+ (this is because the Xception model would not run on the author's machine).
+ For our data set, we use the the CIFR-10 data set 
+\begin_inset CommandInset citation
+LatexCommand cite
+key "CIFR10,CIFR10TFTR"
+
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Standard
+The trainer defaults to a three server model: a PS operating on 
+\family typewriter
+localhost:2222 
+\family default
+and two workers operating on 
+\family typewriter
+localhost:2223
+\family default
+ and
+\family typewriter
+ localhost:222
+\family default
+4.
+ To activate the default model, run the scripts
+\begin_inset Newline newline
+\end_inset
+
+
+\begin_inset listings
+inline false
+status open
+
+\begin_layout Plain Layout
+
+python main.py 
+\backslash
+
+\end_layout
+
+\begin_layout Plain Layout
+
+--job_name=ps --task_index=0
+\end_layout
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset listings
+inline false
+status open
+
+\begin_layout Plain Layout
+
+python main.py 
+\backslash
+
+\end_layout
+
+\begin_layout Plain Layout
+
+--job_name=worker --task_index=0
+\end_layout
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+and (note, only the first worker will operate if 
+\family typewriter
+data_loader.maybe_download_and_extract()
+\family default
+ (discussed below) has not fully executed)
+\begin_inset Newline newline
+\end_inset
+
+
+\begin_inset listings
+inline false
+status open
+
+\begin_layout Plain Layout
+
+python main.py 
+\backslash
+
+\end_layout
+
+\begin_layout Plain Layout
+
+--job_name=worker --task_index=1
+\end_layout
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+After parsing the inputs, if the server is the chief worker (i.e., the worker
+ operating on task 
+\begin_inset Formula $0$
+\end_inset
+
+) the script will call 
+\family typewriter
+data_loader.
+ maybe_download_and_extract()
+\family default
+ (line 276 of 
+\family typewriter
+model_inputs.py
+\family default
+) at the beginning of 
+\family typewriter
+main()
+\family default
+, which will determine whether a local directory to the CIFR-10 data set
+ exists in 
+\family typewriter
+./trainer_functions_data
+\family default
+ of the local machine.
+ If it does not, 
+\family typewriter
+data_loader.maybe_download_and_extract()
+\family default
+ will download the binary from 
+\family typewriter
+http://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz
+\family default
+.
+ Once this has downloaded, all other workers can be run.
+ A cluster specification dictionary will then be built from the parsed data,
+ and used to set up a local server (for the default setup, three servers
+ in total will be created: one PS and two workers).
+\begin_inset Newline newline
+\end_inset
+
+
+\begin_inset listings
+inline false
+status open
+
+\begin_layout Plain Layout
+
+  # Create a cluster from the parameter server and worker hosts.
+   
+\end_layout
+
+\begin_layout Plain Layout
+
+cluster = tf.train.ClusterSpec({"ps": ps_hosts, "worker": worker_hosts})
+\end_layout
+
+\begin_layout Plain Layout
+
+  # Create and start a server for the local task.
+   
+\end_layout
+
+\begin_layout Plain Layout
+
+server = tf.train.Server(cluster,job_name=settings.FLAGS.job_name,
+\end_layout
+
+\begin_layout Plain Layout
+
+						task_index=settings.FLAGS.task_index) 
+\end_layout
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+If the server is a PS task, the script will be blocked at 
+\family typewriter
+server.join()
+\family default
+ (line 27 of 
+\family typewriter
+main.py
+\family default
+) sitting idly waiting for the workers to forward parameter updates to it;
+ otherwise, the worker will begin operation.
+ 
+\end_layout
+
+\begin_layout Standard
+Before the workers construct the graph, the script will ask whether the
+ Xception model is to be used.
+ After this, 
+\family typewriter
+model_inputs.
+ distorted_inputs()
+\family default
+ (line 148 of 
+\family typewriter
+model_inputs.py
+\family default
+) will be called, which will construct a TensorFlow queue of images.
+ It then randomly distorts the example images in numerous ways (this allows
+ for a more diverse sample set).
+ If Xception was chosen, it will also re-size (make larger) the images so
+ that they are compatible with Xception.
+ 
+\family typewriter
+model_inputs.distorted_inputs()
+\family default
+ will then call 
+\family typewriter
+model_inputs._generate_image_and_label_batch()
+\family default
+ (line 109 of 
+\family typewriter
+model_inputs.py
+\family default
+), which will generate a corresponding queue of batches that can be dequeued
+ by each of the workers.
+ The queue allows for multithreaded data retrieval by making sure that a
+ batch is always available to any of the threads that are running.
+ The workers then construct the computational graph and train the model
+ using 
+\family typewriter
+tf.train.MonitoredTrainingSession()
+\family default
+ in the following script.
+\begin_inset listings
+inline false
+status open
+
+\begin_layout Plain Layout
+
+with tf.train.MonitoredTrainingSession(master=server.target,
+\end_layout
+
+\begin_layout Plain Layout
+
+                                      is_chief=(settings.FLAGS.task_index
+ == 0),
+\end_layout
+
+\begin_layout Plain Layout
+
+                                      checkpoint_dir="./tmp/train_logs",
+\end_layout
+
+\begin_layout Plain Layout
+
+                                      hooks=hooks) as mon_sess:
+\end_layout
+
+\begin_layout Plain Layout
+
+	prev_time = time.time()       
+\end_layout
+
+\begin_layout Plain Layout
+
+	while not mon_sess.should_stop():         
+\end_layout
+
+\begin_layout Plain Layout
+
+	# Run a training step asynchronously.
+         
+\end_layout
+
+\begin_layout Plain Layout
+
+	# See `tf.train.SyncReplicasOptimizer` for additional details on how to
+\end_layout
+
+\begin_layout Plain Layout
+
+	# perform *synchronous* training.
+         
+\end_layout
+
+\begin_layout Plain Layout
+
+	# mon_sess.run handles AbortedError in case of preempted PS.
+         	
+\end_layout
+
+\begin_layout Plain Layout
+
+		mon_sess.run(train_op)         
+\end_layout
+
+\begin_layout Plain Layout
+
+		if mon_sess.run(global_step)%20 == 0:
+\end_layout
+
+\begin_layout Plain Layout
+
+			duration = time.time() - prev_time           
+\end_layout
+
+\begin_layout Plain Layout
+
+			prev_time = time.time()           
+\end_layout
+
+\begin_layout Plain Layout
+
+			examples_per_sec = settings.FLAGS.log_frequency *
+\end_layout
+
+\begin_layout Plain Layout
+
+							settings.FLAGS.batch_size / duration           
+\end_layout
+
+\begin_layout Plain Layout
+
+			print ("examples/sec: %d" % examples_per_sec + ", 
+\end_layout
+
+\begin_layout Plain Layout
+
+							loss: %f" % mon_sess.run(loss)) 
+\end_layout
+
+\end_inset
+
+The TensorFlow method 
+\family typewriter
+tf.train.MonitoredTrainingSession() 
+\family default
+creates a 
+\family typewriter
+MonitoredSession() 
+\family default
+object, which handles the multithreaded queuing.
+ When the worker is the chief, it initializes/restores the session from
+ the most recent checkpoint, and also stores the checkpoints in 
+\family typewriter
+./tmp/train_logs
+\family default
+.
+ When the worker is not a chief, it allows the workers to wait for the chief
+ to begin operation.
+\end_layout
+
+\begin_layout Standard
+\begin_inset CommandInset bibtex
+LatexCommand bibtex
+bibfiles "../../Job_coding/Anyvision/bib"
+options "unsrt"
+
+\end_inset
+
+
+\end_layout
+
+\end_body
+\end_document
